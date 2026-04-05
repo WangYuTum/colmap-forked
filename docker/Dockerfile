@@ -62,7 +62,8 @@ RUN cd /colmap && \
         -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} \
         -DCMAKE_INSTALL_PREFIX=/colmap-install \
         -DFETCHCONTENT_FULLY_DISCONNECTED=${FETCHCONTENT_FULLY_DISCONNECTED} \
-        -DBLA_VENDOR=Intel10_64lp && \
+        -DBLA_VENDOR=Intel10_64lp \
+        -DONNX_ENABLED=ON && \
     ninja install
 
 #
@@ -102,7 +103,8 @@ RUN apt-get update && \
         libmkl-locale \
         libmkl-intel-lp64 \
         libmkl-intel-thread \
-        libmkl-core && \
+        libmkl-core \
+        libcudnn9-cuda-12 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
