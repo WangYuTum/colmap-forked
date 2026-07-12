@@ -30,6 +30,7 @@
 #include "colmap/controllers/option_manager.h"
 
 #include "colmap/controllers/global_pipeline.h"
+#include "colmap/controllers/hierarchical_pipeline.h"
 #include "colmap/controllers/image_reader.h"
 #include "colmap/controllers/incremental_pipeline.h"
 #include "colmap/controllers/pairing.h"
@@ -43,10 +44,12 @@
 #include "colmap/feature/aliked.h"
 #include "colmap/feature/sift.h"
 #if defined(COLMAP_MVS_ENABLED)
+#include "colmap/mvs/advancing_front_meshing.h"
+#include "colmap/mvs/delaunay_meshing.h"
 #include "colmap/mvs/fusion.h"
 #include "colmap/mvs/mesh_simplification.h"
-#include "colmap/mvs/meshing.h"
 #include "colmap/mvs/patch_match_options.h"
+#include "colmap/mvs/poisson_meshing.h"
 #include "colmap/mvs/texture_mapping.h"
 #endif
 #include "colmap/scene/reconstruction_clustering.h"
@@ -73,6 +76,7 @@ OptionManager::OptionManager(bool add_project_options)
   bundle_adjustment = std::make_shared<BundleAdjustmentOptions>();
   mapper = std::make_shared<IncrementalPipelineOptions>();
   global_mapper = std::make_shared<GlobalPipelineOptions>();
+  hierarchical_mapper = std::make_shared<HierarchicalPipelineOptions>();
   gravity_refiner = std::make_shared<GravityRefinerOptions>();
   reconstruction_clusterer =
       std::make_shared<ReconstructionClusteringOptions>();
@@ -81,6 +85,8 @@ OptionManager::OptionManager(bool add_project_options)
   stereo_fusion = std::make_shared<mvs::StereoFusionOptions>();
   poisson_meshing = std::make_shared<mvs::PoissonMeshingOptions>();
   delaunay_meshing = std::make_shared<mvs::DelaunayMeshingOptions>();
+  advancing_front_meshing =
+      std::make_shared<mvs::AdvancingFrontMeshingOptions>();
   mesh_texture_mapping = std::make_shared<mvs::MeshTextureMappingOptions>();
   mesh_simplification = std::make_shared<mvs::MeshSimplificationOptions>();
 #endif
@@ -205,6 +211,7 @@ void OptionManager::AddAllOptions() {
   AddStereoFusionOptions();
   AddPoissonMeshingOptions();
   AddDelaunayMeshingOptions();
+  AddAdvancingFrontMeshingOptions();
   AddMeshTextureMappingOptions();
   AddMeshSimplificationOptions();
 #endif
@@ -760,6 +767,8 @@ void OptionManager::AddGlobalMapperOptions() {
                    &global_mapper->mapper.track_required_tracks_per_view);
   AddDefaultOption("GlobalMapper.track_min_num_views_per_track",
                    &global_mapper->mapper.track_min_num_views_per_track);
+  AddDefaultOption("GlobalMapper.keep_max_num_tracks",
+                   &global_mapper->mapper.keep_max_num_tracks);
 
   // Global positioning options.
   AddDefaultOption("GlobalMapper.gp_use_gpu",
@@ -799,11 +808,15 @@ void OptionManager::AddGlobalMapperOptions() {
                    &global_mapper->mapper.bundle_adjustment.refine_points3D);
   AddDefaultOption("GlobalMapper.ba_min_track_length",
                    &global_mapper->mapper.bundle_adjustment.min_track_length);
+  AddDefaultEnumOption("GlobalMapper.ba_backend",
+                       &global_mapper->mapper.bundle_adjustment.backend,
+                       BundleAdjustmentBackendToString,
+                       BundleAdjustmentBackendFromString);
+  AddDefaultOption("GlobalMapper.ba_gpu_index",
+                   &global_mapper->mapper.ba_gpu_index);
   // Bundle adjustment options (Ceres-specific).
   AddDefaultOption("GlobalMapper.ba_ceres_use_gpu",
                    &global_mapper->mapper.bundle_adjustment.ceres->use_gpu);
-  AddDefaultOption("GlobalMapper.ba_ceres_gpu_index",
-                   &global_mapper->mapper.bundle_adjustment.ceres->gpu_index);
   AddDefaultOption(
       "GlobalMapper.ba_ceres_loss_function_scale",
       &global_mapper->mapper.bundle_adjustment.ceres->loss_function_scale);
@@ -833,6 +846,10 @@ void OptionManager::AddGlobalMapperOptions() {
   AddDefaultOption(
       "GlobalMapper.ra_max_rotation_error_deg",
       &global_mapper->mapper.rotation_averaging.max_rotation_error_deg);
+  AddDefaultEnumOption("GlobalMapper.ra_reweighting",
+                       &global_mapper->mapper.rotation_averaging.reweighting,
+                       RotationAveragingReweightingToString,
+                       RotationAveragingReweightingFromString);
 
   // Threshold options.
   AddDefaultOption("GlobalMapper.max_angular_reproj_error_deg",
@@ -841,6 +858,34 @@ void OptionManager::AddGlobalMapperOptions() {
                    &global_mapper->mapper.max_normalized_reproj_error);
   AddDefaultOption("GlobalMapper.min_tri_angle_deg",
                    &global_mapper->mapper.min_tri_angle_deg);
+}
+
+void OptionManager::AddHierarchicalMapperOptions() {
+  if (added_hierarchical_mapper_options_) {
+    return;
+  }
+  added_hierarchical_mapper_options_ = true;
+
+  // The per-cluster reconstruction is configured through the incremental mapper
+  // options (Mapper.*), so only the hierarchical-specific options are added
+  // here. The incremental_options member is populated from `mapper` by callers.
+  AddDefaultOption("HierarchicalMapper.init_num_trials",
+                   &hierarchical_mapper->init_num_trials);
+  AddDefaultOption("HierarchicalMapper.num_threads",
+                   &hierarchical_mapper->num_threads);
+  AddDefaultOption("HierarchicalMapper.num_workers",
+                   &hierarchical_mapper->num_workers);
+  AddDefaultOption("HierarchicalMapper.is_hierarchical",
+                   &hierarchical_mapper->clustering_options.is_hierarchical);
+  AddDefaultOption("HierarchicalMapper.branching",
+                   &hierarchical_mapper->clustering_options.branching);
+  AddDefaultOption("HierarchicalMapper.image_overlap",
+                   &hierarchical_mapper->clustering_options.image_overlap);
+  AddDefaultOption("HierarchicalMapper.num_image_matches",
+                   &hierarchical_mapper->clustering_options.num_image_matches);
+  AddDefaultOption(
+      "HierarchicalMapper.leaf_max_num_images",
+      &hierarchical_mapper->clustering_options.leaf_max_num_images);
 }
 
 void OptionManager::AddGravityRefinerOptions() {
@@ -995,6 +1040,31 @@ void OptionManager::AddDelaunayMeshingOptions() {
                    &delaunay_meshing->num_threads);
 }
 
+void OptionManager::AddAdvancingFrontMeshingOptions() {
+  if (added_advancing_front_meshing_options_) {
+    return;
+  }
+  added_advancing_front_meshing_options_ = true;
+
+  AddDefaultOption("AdvancingFrontMeshing.max_edge_length",
+                   &advancing_front_meshing->max_edge_length);
+  AddDefaultOption("AdvancingFrontMeshing.visibility_filtering",
+                   &advancing_front_meshing->visibility_filtering);
+  AddDefaultOption(
+      "AdvancingFrontMeshing.visibility_filtering_max_intersections",
+      &advancing_front_meshing->visibility_filtering_max_intersections);
+  AddDefaultOption("AdvancingFrontMeshing.visibility_post_filtering",
+                   &advancing_front_meshing->visibility_post_filtering);
+  AddDefaultOption("AdvancingFrontMeshing.visibility_ray_trim_offset",
+                   &advancing_front_meshing->visibility_ray_trim_offset);
+  AddDefaultOption("AdvancingFrontMeshing.block_size",
+                   &advancing_front_meshing->block_size);
+  AddDefaultOption("AdvancingFrontMeshing.block_overlap",
+                   &advancing_front_meshing->block_overlap);
+  AddDefaultOption("AdvancingFrontMeshing.num_threads",
+                   &advancing_front_meshing->num_threads);
+}
+
 void OptionManager::AddMeshTextureMappingOptions() {
   if (added_mesh_texture_mapping_options_) {
     return;
@@ -1076,6 +1146,7 @@ void OptionManager::Reset(bool reset_logging) {
   added_stereo_fusion_options_ = false;
   added_poisson_meshing_options_ = false;
   added_delaunay_meshing_options_ = false;
+  added_advancing_front_meshing_options_ = false;
   added_mesh_texture_mapping_options_ = false;
   added_mesh_simplification_options_ = false;
 #endif
@@ -1095,6 +1166,7 @@ void OptionManager::ResetOptions(const bool reset_paths) {
   *bundle_adjustment = BundleAdjustmentOptions();
   *mapper = IncrementalPipelineOptions();
   *global_mapper = GlobalPipelineOptions();
+  *hierarchical_mapper = HierarchicalPipelineOptions();
   *gravity_refiner = GravityRefinerOptions();
   *reconstruction_clusterer = ReconstructionClusteringOptions();
 #if defined(COLMAP_MVS_ENABLED)
