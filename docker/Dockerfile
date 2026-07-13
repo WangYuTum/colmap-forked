@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
-ARG UBUNTU_VERSION=24.04
-ARG NVIDIA_CUDA_VERSION=12.9.1
+ARG UBUNTU_VERSION=26.04
+ARG NVIDIA_CUDA_VERSION=13.3.0
 
 #
 # Docker builder stage.
@@ -84,13 +84,15 @@ FROM nvidia/cuda:${NVIDIA_CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS runti
 # build dependencies are not needed.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends --no-install-suggests \
-        libboost-program-options1.83.0 \
+        libboost-program-options1.90.0 \
+        libboost-graph1.90.0 \
+        libboost-thread1.90.0 \
         libc6 \
         libomp5 \
         libopengl0 \
         libmetis5 \
         libceres4t64 \
-        libopenimageio2.4t64 \
+        libopenimageio2.5 \
         libgcc-s1 \
         libgl1 \
         libglew2.2 \
@@ -102,6 +104,9 @@ RUN apt-get update && \
         libqt6svg6 \
         libcurl4 \
         libssl3t64 \
+        libsqlite3-0 \
+        libgmp10 \
+        libmpfr6 \
         libmkl-locale \
         libmkl-intel-lp64 \
         libmkl-intel-thread \

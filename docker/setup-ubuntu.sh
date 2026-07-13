@@ -2,15 +2,20 @@
 
 echo "🚀 Starting intelligent NVIDIA Docker setup..."
 
-echo "📦 Updating NVIDIA driver to latest..."
-sudo apt update
-sudo ubuntu-drivers autoinstall
-echo "🔄 Rebooting required after driver update. Run this script again after reboot."
-# Check if reboot is needed
-if [ -f /var/run/reboot-required ]; then
-    echo "⚠️  System reboot required. Please reboot and run this script again."
-    echo "After reboot, run: sudo reboot && ./setup-ubuntu.sh"
-    exit 0
+echo "� Checking for existing NVIDIA driver..."
+if ! command -v nvidia-smi &> /dev/null || ! nvidia-smi &> /dev/null; then
+    echo "❌ No NVIDIA driver detected. Installing latest driver..."
+    sudo apt update
+    sudo ubuntu-drivers autoinstall
+    echo "🔄 Rebooting required after driver update. Run this script again after reboot."
+    # Check if reboot is needed
+    if [ -f /var/run/reboot-required ]; then
+        echo "⚠️  System reboot required. Please reboot and run this script again."
+        echo "After reboot, run: sudo reboot && ./setup-ubuntu.sh"
+        exit 0
+    fi
+else
+    echo "✅ NVIDIA driver already installed, skipping update"
 fi
 
 echo "🔍 Detecting NVIDIA driver version..."
@@ -25,7 +30,9 @@ get_compatible_cuda_version() {
     local major_ver=$(echo $driver_ver | cut -d'.' -f1)
     
     # NVIDIA Driver-CUDA Compatibility Matrix
-    if [ $major_ver -ge 565 ]; then
+    if [ $major_ver -ge 595 ]; then
+        echo "13.3"  # Driver 595+ supports CUDA 13.3
+    elif [ $major_ver -ge 565 ]; then
         echo "12.9"  # Driver 565+ supports CUDA 12.9
     elif [ $major_ver -ge 560 ]; then
         echo "12.6"  # Driver 560+ supports CUDA 12.6 (your current case)
@@ -56,36 +63,41 @@ echo "📦 Configure Docker"
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 
+echo "🔍 Detecting host Ubuntu version..."
+HOST_UBUNTU_VERSION=$(lsb_release -rs)
+echo "Host Ubuntu version: $HOST_UBUNTU_VERSION"
+
 echo "🔍 Finding latest patch version for CUDA $COMPATIBLE_CUDA..."
-AVAILABLE_VERSIONS=$(curl -s "https://registry.hub.docker.com/v2/repositories/nvidia/cuda/tags/?page_size=100" | jq -r '.results[].name' | grep -E "^${COMPATIBLE_CUDA}\.[0-9]+-base-ubuntu24\.04$" | head -1)
-if [ -n "$AVAILABLE_VERSIONS" ]; then
-    # Extract full version (e.g., "12.9.1" from "12.9.1-base-ubuntu24.04")
-    FULL_CUDA_VERSION=$(echo "$AVAILABLE_VERSIONS" | cut -d'-' -f1)
-    echo "✅ Found CUDA version: $FULL_CUDA_VERSION"
-else
-    echo "❌ No CUDA $COMPATIBLE_CUDA images found for Ubuntu 24.04, trying Ubuntu 22.04..."
-    AVAILABLE_VERSIONS=$(curl -s "https://registry.hub.docker.com/v2/repositories/nvidia/cuda/tags/?page_size=100" | jq -r '.results[].name' | grep -E "^${COMPATIBLE_CUDA}\.[0-9]+-base-ubuntu22\.04$" | head -1)
+# Try matching host Ubuntu version first, then fallback to older versions
+UBUNTU_VERSIONS=("$HOST_UBUNTU_VERSION" "24.04" "22.04")
+FOUND=false
+
+for UBUNTU_VER in "${UBUNTU_VERSIONS[@]}"; do
+    echo "Checking for CUDA ${COMPATIBLE_CUDA} on Ubuntu ${UBUNTU_VER}..."
+    AVAILABLE_VERSIONS=$(curl -s "https://registry.hub.docker.com/v2/repositories/nvidia/cuda/tags/?page_size=100" | jq -r '.results[].name' | grep -E "^${COMPATIBLE_CUDA}\.[0-9]+-base-ubuntu${UBUNTU_VER}$" | head -1)
     
     if [ -n "$AVAILABLE_VERSIONS" ]; then
         FULL_CUDA_VERSION=$(echo "$AVAILABLE_VERSIONS" | cut -d'-' -f1)
-        UBUNTU_VERSION="22.04"
-        echo "✅ Found CUDA version: $FULL_CUDA_VERSION for Ubuntu 22.04"
-    else
-        echo "❌ No compatible CUDA images found"
-        exit 1
+        UBUNTU_VERSION="$UBUNTU_VER"
+        echo "✅ Found CUDA version: $FULL_CUDA_VERSION for Ubuntu $UBUNTU_VERSION"
+        FOUND=true
+        break
     fi
+done
+
+if [ "$FOUND" = false ]; then
+    echo "❌ No compatible CUDA images found for any Ubuntu version"
+    exit 1
 fi
 
 echo "🧪 Testing with automatically detected compatible CUDA version: $COMPATIBLE_CUDA..."
-if docker run --rm --runtime=nvidia nvidia/cuda:${FULL_CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION:-24.04} nvidia-smi; then
+if docker run --rm --runtime=nvidia nvidia/cuda:${FULL_CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION} nvidia-smi; then
     echo "✅ GPU support working with CUDA $FULL_CUDA_VERSION!"
     # Update Dockerfile with compatible version
     if [ -f "Dockerfile" ]; then
         sed -i "s/ARG NVIDIA_CUDA_VERSION=.*/ARG NVIDIA_CUDA_VERSION=${FULL_CUDA_VERSION}/" Dockerfile
-        if [ "${UBUNTU_VERSION:-24.04}" = "22.04" ]; then
-            sed -i "s/ARG UBUNTU_VERSION=.*/ARG UBUNTU_VERSION=22.04/" Dockerfile
-        fi
-        echo "✅ Updated Dockerfile to use CUDA $FULL_CUDA_VERSION"
+        sed -i "s/ARG UBUNTU_VERSION=.*/ARG UBUNTU_VERSION=${UBUNTU_VERSION}/" Dockerfile
+        echo "✅ Updated Dockerfile to use CUDA $FULL_CUDA_VERSION with Ubuntu $UBUNTU_VERSION"
     fi
 else
     echo "❌ GPU test failed with CUDA $FULL_CUDA_VERSION"
