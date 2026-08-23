@@ -111,7 +111,14 @@ RUN apt-get update && \
         libmkl-intel-lp64 \
         libmkl-intel-thread \
         libmkl-core \
-        libcudnn9-cuda-12 && \
+        libcudnn9-cuda-12 \
+        libcublas12 \
+        libcublaslt12 \
+        libcufft11 \
+        libcudart12 \
+        libcurand10 \
+        libnvrtc12 \
+        libnvrtc-builtins12.4 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
